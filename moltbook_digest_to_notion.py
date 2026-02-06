@@ -170,7 +170,7 @@ class MoltbookAPI:
         # Build permalink — API returns url=null for text posts
         url = raw.get("url") or raw.get("permalink") or raw.get("link") or ""
         if not url and post_id:
-            url = f"https://moltbook.com/posts/{post_id}"
+            url = f"https://www.moltbook.com/post/{post_id}"
 
         # submolt can be a nested object or a plain string
         submolt = raw.get("submolt") or raw.get("community") or ""
