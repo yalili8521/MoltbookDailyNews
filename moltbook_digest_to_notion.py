@@ -55,6 +55,7 @@ class Config:
     top_streak_topics_n: int = 5
 
     dry_run: bool = False
+    force_run: bool = False
     enable_comment_sampling: bool = False
 
     cache_dir: str = ".cache"
@@ -74,6 +75,7 @@ class Config:
             top_streak_posts_n=int(os.getenv("TOP_STREAK_POSTS_N", "5")),
             top_streak_topics_n=int(os.getenv("TOP_STREAK_TOPICS_N", "5")),
             dry_run=os.getenv("DRY_RUN", "0") == "1",
+            force_run=os.getenv("FORCE_RUN", "0") == "1",
             enable_comment_sampling=os.getenv("ENABLE_COMMENT_SAMPLING", "0") == "1",
             cache_dir=os.getenv("CACHE_DIR", ".cache"),
         )
@@ -722,8 +724,9 @@ class NotionClient:
         self.session.mount("https://", HTTPAdapter(max_retries=retry))
 
     @staticmethod
-    def _rich_text(text: str, limit: int = 2000) -> list[dict]:
-        """Notion rich_text blocks are limited to 2000 chars each."""
+    def _rich_text(text: str, limit: int = 1900) -> list[dict]:
+        """Notion rich_text blocks are limited to 2000 chars each.
+        Use 1900 to leave headroom for multi-byte / surrogate chars."""
         chunks = []
         for i in range(0, len(text), limit):
             chunks.append({"type": "text", "text": {"content": text[i : i + limit]}})
@@ -835,7 +838,7 @@ def main() -> None:
 
     # -- schedule gate --
     state = cache.read_state()
-    if not scheduler.should_run(state.get("last_posted_date", ""), force=cfg.dry_run):
+    if not scheduler.should_run(state.get("last_posted_date", ""), force=cfg.dry_run or cfg.force_run):
         sys.exit(0)
 
     today = scheduler.today()
