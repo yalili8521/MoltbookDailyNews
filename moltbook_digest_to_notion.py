@@ -726,10 +726,22 @@ class NotionClient:
     @staticmethod
     def _rich_text(text: str, limit: int = 1900) -> list[dict]:
         """Notion rich_text blocks are limited to 2000 chars each.
-        Use 1900 to leave headroom for multi-byte / surrogate chars."""
-        chunks = []
-        for i in range(0, len(text), limit):
-            chunks.append({"type": "text", "text": {"content": text[i : i + limit]}})
+        Use 1900 to leave headroom for multi-byte / surrogate chars.
+        URLs are turned into clickable links."""
+        import re
+        url_re = re.compile(r'(https?://\S+)')
+        parts = url_re.split(text)
+        chunks: list[dict] = []
+        for part in parts:
+            if not part:
+                continue
+            if url_re.fullmatch(part):
+                # Clickable link segment
+                chunks.append({"type": "text", "text": {"content": part, "link": {"url": part}}})
+            else:
+                # Plain text, chunk if too long
+                for i in range(0, len(part), limit):
+                    chunks.append({"type": "text", "text": {"content": part[i : i + limit]}})
         return chunks
 
     def create_page(self, digest: dict) -> str:
