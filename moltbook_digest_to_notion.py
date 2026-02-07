@@ -956,8 +956,8 @@ class ScheduleChecker:
         if force:
             return True
         now = datetime.now(self._tz)
-        if now.hour != 8 or now.minute >= 10:
-            log.info("Not in 8:00-8:09 AM PT window (current: %s). Skipping.", now.strftime("%H:%M"))
+        if now.hour != 8 or now.minute >= 30:
+            log.info("Not in 8:00-8:29 AM PT window (current: %s). Skipping.", now.strftime("%H:%M"))
             return False
         today = now.strftime("%Y-%m-%d")
         if last_posted_date == today:
