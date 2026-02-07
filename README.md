@@ -1,14 +1,15 @@
 # MoltbookDailyNews
 
-Automated daily digest that fetches trending posts from [Moltbook](https://www.moltbook.com), scores them, detects multi-day trends, and writes a **Moltbook Daily Brief** page to a Notion database.
+Automated daily digest that fetches trending posts from [Moltbook](https://www.moltbook.com) and [Hacker News](https://news.ycombinator.com), scores them, detects multi-day trends, and writes a **Daily Brief** page to a Notion database.
 
 ## Features
 
+- **Dual-source digest** — Moltbook + Hacker News in one Notion page
 - **HOT ranking** — engagement score (`score + 2 × comments`)
 - **RISING detection** — snapshot-based velocity with recency boost
 - **Comment surge alerts** — identifies threads with rapid comment growth
 - **Multi-day streaks ("持续升温")** — posts/topics trending across 2-3+ days
-- **Topic extraction** — keyword map + bigram fallback
+- **Topic extraction** — keyword map + bigram fallback, combined across both sources
 - **Builder Notes** — actionable signals, distribution plays, what to copy
 - **DST-safe scheduling** — runs at 8:00 AM Pacific regardless of daylight saving
 - **Duplicate prevention** — only posts once per day
@@ -57,16 +58,28 @@ pip install -r requirements.txt
 | `TOP_STREAK_TOPICS_N` | No | `5` | Max streak topics shown |
 | `DRY_RUN` | No | `0` | `1` = print digest to console, skip Notion |
 | `ENABLE_COMMENT_SAMPLING` | No | `0` | `1` = fetch top comments for surge posts |
+| `ENABLE_HN` | No | `1` | `1` = include Hacker News section in digest |
+| `HN_LIMIT` | No | `30` | Max HN stories to fetch |
+| `TOP_HN_N` | No | `7` | HN hot picks in digest |
+| `HN_MIN_SCORE` | No | `10` | Minimum HN score to include |
+| `HN_MIN_COMMENTS` | No | `3` | Minimum HN comments to include |
 
 \* Not required when `DRY_RUN=1`
 
 ## Usage
 
-### Local (dry run)
+### Local (dry run — Moltbook + Hacker News)
 
 ```bash
 export MOLTBOOK_API_KEY="moltbook_xxx_your_key"
-DRY_RUN=1 python moltbook_digest_to_notion.py
+ENABLE_HN=1 DRY_RUN=1 python moltbook_digest_to_notion.py
+```
+
+### Local (dry run — Moltbook only)
+
+```bash
+export MOLTBOOK_API_KEY="moltbook_xxx_your_key"
+ENABLE_HN=0 DRY_RUN=1 python moltbook_digest_to_notion.py
 ```
 
 ### Local (post to Notion)
@@ -103,6 +116,8 @@ The script maintains `.cache/` files across runs:
 
 - `moltbook_snapshot.json` — per-post score/comment snapshots for velocity calculation
 - `moltbook_history.json` — 14-day rolling history for streak detection
+- `hn_snapshot.json` — Hacker News score/comment snapshots
+- `hn_history.json` — Hacker News 14-day rolling history
 - `state.json` — last posted date to prevent duplicates
 
 A post is "持续升温" if it appears in HOT/RISING for ≥2 of the last 3 days.
@@ -121,6 +136,8 @@ MoltbookDailyNews/
 └── .cache/                        # Created at runtime (git-ignored)
     ├── moltbook_snapshot.json
     ├── moltbook_history.json
+    ├── hn_snapshot.json
+    ├── hn_history.json
     └── state.json
 ```
 

@@ -60,6 +60,12 @@ class Config:
 
     cache_dir: str = ".cache"
 
+    enable_hn: bool = True
+    hn_limit: int = 30
+    top_hn_n: int = 7
+    hn_min_score: int = 10
+    hn_min_comments: int = 3
+
     @classmethod
     def from_env(cls) -> "Config":
         c = cls(
@@ -78,6 +84,11 @@ class Config:
             force_run=os.getenv("FORCE_RUN", "0") == "1",
             enable_comment_sampling=os.getenv("ENABLE_COMMENT_SAMPLING", "0") == "1",
             cache_dir=os.getenv("CACHE_DIR", ".cache"),
+            enable_hn=os.getenv("ENABLE_HN", "1") == "1",
+            hn_limit=int(os.getenv("HN_LIMIT", "30")),
+            top_hn_n=int(os.getenv("TOP_HN_N", "7")),
+            hn_min_score=int(os.getenv("HN_MIN_SCORE", "10")),
+            hn_min_comments=int(os.getenv("HN_MIN_COMMENTS", "3")),
         )
         return c
 
@@ -219,6 +230,71 @@ class MoltbookAPI:
 
 
 # ---------------------------------------------------------------------------
+# Hacker News API client
+# ---------------------------------------------------------------------------
+class HackerNewsAPI:
+    BASE = "https://hacker-news.firebaseio.com/v0"
+
+    def __init__(self) -> None:
+        self.session = requests.Session()
+        retry = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"],
+        )
+        self.session.mount("https://", HTTPAdapter(max_retries=retry))
+
+    def get_top_posts(
+        self, limit: int = 30, min_score: int = 10, min_comments: int = 3
+    ) -> list[Post]:
+        resp = self.session.get(f"{self.BASE}/topstories.json", timeout=30)
+        resp.raise_for_status()
+        story_ids = resp.json()[: limit * 2]  # fetch extra to account for filtering
+
+        posts: list[Post] = []
+        for sid in story_ids:
+            if len(posts) >= limit:
+                break
+            try:
+                item_resp = self.session.get(
+                    f"{self.BASE}/item/{sid}.json", timeout=15
+                )
+                item_resp.raise_for_status()
+                item = item_resp.json()
+                if not item or item.get("type") != "story":
+                    continue
+                score = item.get("score", 0)
+                comments = item.get("descendants", 0)
+                if score < min_score or comments < min_comments:
+                    continue
+                created = datetime.fromtimestamp(
+                    item.get("time", 0), tz=timezone.utc
+                )
+                url = (
+                    item.get("url")
+                    or f"https://news.ycombinator.com/item?id={sid}"
+                )
+                posts.append(
+                    Post(
+                        id=f"hn_{sid}",
+                        title=item.get("title", "(untitled)"),
+                        url=url,
+                        score=score,
+                        comment_count=comments,
+                        created_at=created,
+                        community="HackerNews",
+                    )
+                )
+            except Exception as exc:
+                log.debug("Failed to fetch HN item %s: %s", sid, exc)
+            time.sleep(0.05)
+
+        log.info("Fetched %d HN posts (after filtering)", len(posts))
+        return posts
+
+
+# ---------------------------------------------------------------------------
 # Cache manager
 # ---------------------------------------------------------------------------
 class CacheManager:
@@ -228,6 +304,8 @@ class CacheManager:
         self.snapshot_path = os.path.join(self.dir, "moltbook_snapshot.json")
         self.history_path = os.path.join(self.dir, "moltbook_history.json")
         self.state_path = os.path.join(self.dir, "state.json")
+        self.hn_snapshot_path = os.path.join(self.dir, "hn_snapshot.json")
+        self.hn_history_path = os.path.join(self.dir, "hn_history.json")
 
     # -- atomic write --
     def _write(self, path: str, data: Any) -> None:
@@ -275,6 +353,20 @@ class CacheManager:
 
     def write_state(self, data: dict) -> None:
         self._write(self.state_path, data)
+
+    # -- HN snapshot --
+    def read_hn_snapshot(self) -> dict:
+        return self._read(self.hn_snapshot_path)
+
+    def write_hn_snapshot(self, data: dict) -> None:
+        self._write(self.hn_snapshot_path, data)
+
+    # -- HN history --
+    def read_hn_history(self) -> dict:
+        return self._read(self.hn_history_path)
+
+    def write_hn_history(self, data: dict) -> None:
+        self._write(self.hn_history_path, data)
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +666,7 @@ class DigestBuilder:
         self._tr.bulk_translate(list(set(all_titles)))
 
         return {
-            "title": f"Moltbook Daily Brief — {date_str}",
+            "title": f"Daily Brief — {date_str}",
             "date": date_str,
             "topics": topics,
             "tldr": self._tldr(topics, hot, rising, surges),
@@ -703,6 +795,57 @@ class DigestBuilder:
 
         return "\n".join(notes)
 
+    def build_hn_section(
+        self,
+        hot: list[Post],
+        rising: list[tuple[Post, float]],
+        topics: list[str],
+        post_streaks: list[dict],
+    ) -> str:
+        """Build the Hacker News section text."""
+        all_titles = [p.title for p in hot] + [p.title for p, _ in rising]
+        all_titles += [s["title"] for s in post_streaks]
+        self._tr.bulk_translate(list(set(all_titles)))
+
+        lines: list[str] = []
+
+        if topics:
+            lines.append("Top Themes: " + ", ".join(topics[:4]))
+            lines.append("")
+
+        lines.append("HOT Picks")
+        for i, p in enumerate(hot, 1):
+            lines.append(
+                f"{i}. {p.title}  (engagement {p.engagement:.0f})  {p.url}"
+            )
+            zh = self._zh(p.title)
+            if zh:
+                lines.append(zh)
+
+        if rising:
+            lines.append("")
+            lines.append("Rising Now")
+            for i, (p, vel) in enumerate(rising, 1):
+                lines.append(
+                    f"{i}. {p.title}  (velocity {vel:.1f}/h)  {p.url}"
+                )
+                zh = self._zh(p.title)
+                if zh:
+                    lines.append(zh)
+
+        if post_streaks:
+            lines.append("")
+            lines.append("持续升温")
+            for s in post_streaks[:3]:
+                lines.append(
+                    f"  • {s['title']}  ({s['streak_days']}-day streak)"
+                )
+                zh = self._zh(s["title"])
+                if zh:
+                    lines.append(f"  {zh.strip()}")
+
+        return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # Notion client
@@ -746,7 +889,7 @@ class NotionClient:
 
     def create_page(self, digest: dict) -> str:
         # -- build top_posts combined text --
-        top_posts_text = "\n\n".join(
+        moltbook_text = "\n\n".join(
             filter(
                 None,
                 [
@@ -757,6 +900,15 @@ class NotionClient:
                 ],
             )
         )
+        if digest.get("hn_section"):
+            top_posts_text = (
+                "━━━ Moltbook ━━━\n\n"
+                + moltbook_text
+                + "\n\n━━━ Hacker News ━━━\n\n"
+                + digest["hn_section"]
+            )
+        else:
+            top_posts_text = moltbook_text
 
         properties: dict[str, Any] = {
             "Name": {"title": self._rich_text(digest["title"])},
@@ -915,6 +1067,51 @@ def main() -> None:
     )
     log.info("Streaks: %d posts, %d topics", len(post_streaks), len(topic_streaks))
 
+    # -- HN integration --
+    moltbook_topics = topics[:]  # preserve for Moltbook history
+    hn_all_posts: list[Post] = []
+    hn_top_hot: list[Post] = []
+    hn_top_rising: list[tuple[Post, float]] = []
+    hn_topics: list[str] = []
+    hn_post_streaks: list[dict] = []
+    hn_snapshot: dict = {}
+    hn_history: dict = {}
+    hn_hot_ids: list[str] = []
+    hn_rising_ids: list[str] = []
+
+    if cfg.enable_hn:
+        log.info("Fetching Hacker News top stories…")
+        hn_api = HackerNewsAPI()
+        hn_all_posts = hn_api.get_top_posts(
+            cfg.hn_limit, cfg.hn_min_score, cfg.hn_min_comments
+        )
+
+        if hn_all_posts:
+            hn_snapshot = cache.read_hn_snapshot()
+
+            hn_top_hot = scorer.rank_hot(hn_all_posts, cfg.top_hn_n)
+            hn_top_rising = scorer.rank_rising(hn_all_posts, hn_snapshot, 5)
+
+            hn_topics = extractor.extract(
+                hn_top_hot + [p for p, _ in hn_top_rising], max_tags=4
+            )
+
+            # Combine topics: Moltbook + HN, deduplicated, max 6
+            topics = list(dict.fromkeys(topics + hn_topics))[:6]
+
+            hn_history = cache.read_hn_history()
+            hn_hot_ids = [p.id for p in hn_top_hot]
+            hn_rising_ids = [p.id for p, _ in hn_top_rising]
+
+            hn_post_streaks = StreakDetector.detect_post_streaks(
+                hn_history, hn_hot_ids, hn_rising_ids, hn_snapshot, 3
+            )
+
+            log.info(
+                "HN ranked: %d hot, %d rising, %d streaks",
+                len(hn_top_hot), len(hn_top_rising), len(hn_post_streaks),
+            )
+
     # -- build digest --
     builder = DigestBuilder()
     digest = builder.build(
@@ -930,6 +1127,12 @@ def main() -> None:
         }
     )
 
+    # Add HN section if available
+    if hn_top_hot:
+        digest["hn_section"] = builder.build_hn_section(
+            hn_top_hot, hn_top_rising, hn_topics, hn_post_streaks
+        )
+
     # -- dry-run output --
     if cfg.dry_run:
         import io, sys as _sys
@@ -944,6 +1147,9 @@ def main() -> None:
         print(f"{sep}\n")
         print(f"Top Themes: {', '.join(digest['topics'])}\n")
         print(f"TL;DR: {digest['tldr']}\n")
+        has_hn = "hn_section" in digest
+        if has_hn:
+            print(f"{'━' * 20} Moltbook {'━' * 24}\n")
         print(digest["hot_section"])
         print()
         print(digest["rising_section"])
@@ -951,6 +1157,9 @@ def main() -> None:
         print(digest["surge_section"])
         print()
         print(digest["streak_section"])
+        if has_hn:
+            print(f"\n{'━' * 20} Hacker News {'━' * 21}\n")
+            print(digest["hn_section"])
         print()
         print("Builder Notes:")
         print(digest["builder_notes"])
@@ -966,9 +1175,17 @@ def main() -> None:
     cache.write_snapshot(updated_snapshot)
 
     updated_history = StreakDetector.update_history(
-        history, today, hot_ids, rising_ids, surge_ids, topics
+        history, today, hot_ids, rising_ids, surge_ids, moltbook_topics
     )
     cache.write_history(updated_history)
+
+    if hn_all_posts:
+        cache.write_hn_snapshot(build_snapshot_update(hn_snapshot, hn_all_posts))
+        cache.write_hn_history(
+            StreakDetector.update_history(
+                hn_history, today, hn_hot_ids, hn_rising_ids, [], hn_topics
+            )
+        )
 
     cache.write_state({"last_posted_date": today})
 
